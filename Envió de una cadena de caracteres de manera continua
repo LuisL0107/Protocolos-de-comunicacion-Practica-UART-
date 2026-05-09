@@ -1,0 +1,110 @@
+void setup() {
+  // Inicializar comunicación serial para monitoreo en PC
+  Serial.begin(115200);
+  
+  // Inicializar UART en pines 18 (TX1) y 19 (RX1) a 115200 baudios
+  Serial1.begin(115200);
+  
+  Serial.println("=================================");
+  Serial.println("Sistema iniciado - 115200 baudios");
+  Serial.println("Enviando cadena 'UPIIZ' en ASCII");
+  Serial.println("=================================");
+  delay(10);
+}
+
+void loop() {
+  // Cadena a enviar "UPIIZ" en ASCII
+  const char* cadenaEnviar = "UPIIZ\n";
+  int longitud = strlen(cadenaEnviar);
+  
+  // Mostrar valores ASCII de cada caracter
+  Serial.println("\n--- Nueva transmisión ---");
+  Serial.print("Enviando cadena: ");
+  Serial.println(cadenaEnviar);
+  
+  Serial.print("Valores ASCII: ");
+  for (int i = 0; i < longitud; i++) {
+    Serial.print(cadenaEnviar[i]);
+    Serial.print("(");
+    Serial.print((int)cadenaEnviar[i]);
+    Serial.print(") ");
+  }
+  Serial.println();
+  
+  // Enviar cada caracter de la cadena
+  for (int i = 0; i < longitud; i++) {
+    Serial1.write(cadenaEnviar[i]);  // Enviar caracter
+    Serial.print("Enviado: '");
+    Serial.print(cadenaEnviar[i]);
+    Serial.print("' (ASCII: ");
+    Serial.print((int)cadenaEnviar[i]);
+    Serial.println(")");
+    delay(1);  // Pequeña pausa entre caracteres
+  }
+  
+  Serial.println("Esperando eco del MSP430...");
+  
+  // Recibir el eco
+  String cadenaRecibida = "";
+  unsigned long tiempoInicio = millis();
+  unsigned long tiempoUltimoCaracter = millis();
+  
+  // Esperar hasta 1 segundo para recibir todos los caracteres
+  while ((millis() - tiempoInicio) < 1000) {
+    if (Serial1.available() > 0) {
+      char caracterRecibido = Serial1.read();
+      cadenaRecibida += caracterRecibido;
+      tiempoUltimoCaracter = millis();
+      
+      Serial.print("Recibido: '");
+      Serial.print(caracterRecibido);
+      Serial.print("' (ASCII: ");
+      Serial.print((int)caracterRecibido);
+      Serial.println(")");
+    }
+    
+    // Si han pasado 100ms sin recibir datos, asumir fin de transmisión
+    if ((millis() - tiempoUltimoCaracter) > 100 && cadenaRecibida.length() > 0) {
+      break;
+    }
+  }
+  
+  // Mostrar resultados
+  Serial.println("\n--- Resultado ---");
+  Serial.print("Cadena enviada: ");
+  Serial.println(cadenaEnviar);
+  
+  Serial.print("Cadena recibida: ");
+  if (cadenaRecibida.length() > 0) {
+    Serial.println(cadenaRecibida);
+    
+    // Verificar caracter por caracter
+    bool exito = true;
+    if (cadenaRecibida.length() == longitud) {
+      for (int i = 0; i < longitud; i++) {
+        if (cadenaRecibida[i] != cadenaEnviar[i]) {
+          exito = false;
+          break;
+        }
+      }
+    } else {
+      exito = false;
+    }
+    
+    if (exito) {
+      Serial.println("✅ ÉXITO - Eco perfecto de 'UPIIZ'");
+    } else {
+      Serial.println("❌ FALLO - El eco no coincide");
+      Serial.print("Longitud esperada: ");
+      Serial.print(longitud);
+      Serial.print(", Recibida: ");
+      Serial.println(cadenaRecibida.length());
+    }
+  } else {
+    Serial.println("❌ ERROR - No se recibió respuesta del MSP430");
+  }
+  
+  Serial.println("=================================");
+  
+  
+}
