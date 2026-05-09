@@ -1,0 +1,292 @@
+#include <msp430f5529.h>
+
+#define BUFFER_SIZE     64
+#define CORTAR_EN       50
+#define TIMEOUT_MS      1000        // 1 segundo de timeout
+
+// Variables globales
+char buffer[BUFFER_SIZE];
+unsigned char pos = 0;
+unsigned char detenido = 0;
+unsigned char timeout_activo = 0;    // 1 = timer contando, 0 = timer apagado
+unsigned int contador_timeout = 0;   // Contador manual (alternativa)
+
+// Prototipos
+void configurarUARTs(void);
+void configurarTimerTimeout(void);
+void iniciarTimeout(void);
+void detenerTimeout(void);
+void enviarCharPC(char c);
+void enviarCadenaPC(const char *str);
+
+// ==================== CONFIGURACIÓN UART ====================
+
+void configurarUARTs(void)
+{
+    // UCA1: Enviar a la PC (P4.4/P4.5)
+    P4SEL |= BIT4 + BIT5;
+    UCA1CTL1 |= UCSWRST;
+    UCA1CTL0 = 0x00;
+    UCA1CTL1 |= UCSSEL_1;           // ACLK
+    UCA1BR0 = 3;                    // 9600 baud
+    UCA1BR1 = 0;
+    UCA1MCTL = UCBRS_3;
+    UCA1CTL1 &= ~UCSWRST;
+    
+    // UCA0: Recibir de dispositivo externo (P3.3/P3.4)
+    P3SEL |= BIT3 + BIT4;
+    UCA0CTL1 |= UCSWRST;
+    UCA0CTL0 = 0x00;
+    UCA0CTL1 |= UCSSEL_1;           // ACLK (usar misma velocidad)
+    UCA0BR0 = 3;
+    UCA0BR1 = 0;
+    UCA0MCTL = UCBRS_3;
+    UCA0CTL1 &= ~UCSWRST;
+}
+
+// ==================== FUNCIONES DE ENVÍO A PC ====================
+
+void enviarCharPC(char c)
+{
+    while(!(UCA1IFG & UCTXIFG));
+    UCA1TXBUF = c;
+}
+
+void enviarCadenaPC(const char *str)
+{
+    while(*str) enviarCharPC(*str++);
+}
+
+void enviarNumeroPC(unsigned int num)
+{
+    char digitos[5];
+    unsigned char i = 0;
+    
+    if(num == 0)
+    {
+        enviarCharPC('0');
+        return;
+    }
+    
+    while(num > 0)
+    {
+        digitos[i++] = (num % 10) + '0';
+        num /= 10;
+    }
+    
+    while(i > 0)
+    {
+        enviarCharPC(digitos[--i]);
+    }
+}
+
+// ==================== TIMEOUT (Timer_A0 con ACLK) ====================
+
+void configurarTimerTimeout(void)
+{
+    // Configurar Timer_A0 con ACLK
+    TA0CTL = TASSEL_1 | ID_3 | TACLR;
+    // TASSEL_1 = ACLK (32768 Hz)
+    // ID_3 = División por 8 → 32768/8 = 4096 Hz
+    // TACLR = Limpiar contador
+    
+    // Deshabilitar interrupciones del timer por ahora
+    TA0CTL &= ~(TAIE | TAIFG);
+    TA0CCTL0 &= ~(CCIE | CCIFG);
+}
+
+void iniciarTimeout(void)
+{
+    // Limpiar el contador y el flag
+    TA0R = 0;
+    TA0CTL &= ~TAIFG;               // Limpiar flag de interrupción
+    
+    // Calcular el valor de compare para 1 segundo
+    // 1 segundo = 4096 ticks (porque 4096 Hz * 1s = 4096)
+    unsigned int ticks_1segundo = 4096;
+    
+    // Configurar el modo comparador
+    TA0CCR0 = ticks_1segundo;
+    TA0CCTL0 = CCIE;                // Habilitar interrupción en comparación
+    
+    // Usar modo continuo
+    TA0CTL |= MC_2;                 // Continuous mode
+    
+    timeout_activo = 1;
+}
+
+void detenerTimeout(void)
+{
+    // Detener el timer y deshabilitar interrupción
+    TA0CTL &= ~MC_2;                // Detener timer
+    TA0CCTL0 &= ~CCIE;              // Deshabilitar interrupción
+    TA0CTL &= ~TAIFG;               // Limpiar flags
+    timeout_activo = 0;
+}
+
+// Interrupción del Timer_A0 (se activa cuando pasa el tiempo)
+#pragma vector=TIMER0_A0_VECTOR
+__interrupt void TIMER0_A0_ISR(void)
+{
+    if(timeout_activo)
+    {
+        // ¡Se cumplió el timeout!
+        if(pos > 0 && !detenido)
+        {
+            // Hay datos en el buffer pero no llegó \n
+            buffer[pos] = '\0';
+            
+            // Mostrar mensaje de timeout en la PC
+            enviarCadenaPC("\r\n[TIMEOUT] Mensaje incompleto:\r\n");
+            enviarCadenaPC("Parcial: ");
+            enviarCadenaPC(buffer);
+            enviarCadenaPC("\r\n");
+            
+            // Opcional: mostrar cuántos caracteres se recibieron
+            enviarCadenaPC("Caracteres recibidos: ");
+            enviarNumeroPC(pos);
+            enviarCadenaPC("\r\n");
+            
+            // Reiniciar buffer para próximo mensaje
+            pos = 0;
+            
+            // Si estaba detenido por buffer lleno, NO reactivar
+            if(!detenido)
+            {
+                enviarCadenaPC("Esperando nuevo mensaje...\r\n> ");
+            }
+        }
+        
+        // Detener el timer
+        detenerTimeout();
+    }
+}
+
+// ==================== FUNCIONES DE CONTROL DE BUFFER ====================
+
+void detenerComunicacionExterna(void)
+{
+    detenido = 1;
+    detenerTimeout();               // Detener timer si estaba activo
+    enviarCadenaPC("\r\n[BUFFER LLENO] Recepcion detenida\r\n");
+    enviarCadenaPC("Presiona 'r' para reiniciar, o RESET fisico\r\n");
+}
+
+void reanudarComunicacionExterna(void)
+{
+    detenido = 0;
+    pos = 0;
+    buffer[0] = '\0';
+    enviarCadenaPC("\r\n[REINICIADO] Buffer vacio, esperando datos\r\n> ");
+}
+
+// ==================== PROGRAMA PRINCIPAL ====================
+
+void main(void)
+{
+    char caracter;
+    
+    // Detener watchdog
+    WDTCTL = WDTPW | WDTHOLD;
+    
+    // Configurar periféricos
+    configurarUARTs();
+    configurarTimerTimeout();
+    
+    // Mensaje de inicio
+    enviarCadenaPC("\r\n=== RECEPTOR UART CON TIMEOUT ===\r\n");
+    enviarCadenaPC("Timeout: ");
+    enviarNumeroPC(TIMEOUT_MS);
+    enviarCadenaPC(" ms (sin salto de linea)\r\n");
+    enviarCadenaPC("Buffer maximo: ");
+    enviarNumeroPC(BUFFER_SIZE);
+    enviarCadenaPC(" bytes\r\n");
+    enviarCadenaPC("Corte por llenado: ");
+    enviarNumeroPC(CORTAR_EN);
+    enviarCadenaPC(" caracteres en un mensaje\r\n");
+    enviarCadenaPC("----------------------------------------\r\n");
+    enviarCadenaPC("> ");
+    
+    while(1)
+    {
+        // Verificar si llegó un comando desde la PC (para reiniciar)
+        if(UCA1IFG & UCRXIFG)
+        {
+            char comando = UCA1RXBUF;
+            if(comando == 'r' || comando == 'R')
+            {
+                reanudarComunicacionExterna();
+            }
+        }
+        
+        // Verificar si hay datos del dispositivo externo
+        if(UCA0IFG & UCRXIFG)
+        {
+            caracter = UCA0RXBUF;
+            
+            // Si estamos detenidos por buffer lleno, ignorar todo
+            if(detenido)
+            {
+                continue;   // No procesar más caracteres
+            }
+            
+            // Verificar si es salto de línea (ENTER)
+            if(caracter == '\n' || caracter == '\r')
+            {
+                if(pos > 0)
+                {
+                    // ¡Mensaje completo recibido!
+                    buffer[pos] = '\0';
+                    
+                    // Detener el timer porque ya llegó el mensaje completo
+                    detenerTimeout();
+                    
+                    // Mostrar el mensaje recibido
+                    enviarCadenaPC("\r\n[RECIBIDO] ");
+                    enviarCadenaPC(buffer);
+                    enviarCadenaPC("\r\n");
+                    
+                    enviarCadenaPC("Longitud: ");
+                    enviarNumeroPC(pos);
+                    enviarCadenaPC(" caracteres\r\n> ");
+                    
+                    // Reiniciar buffer para próximo mensaje
+                    pos = 0;
+                }
+                else
+                {
+                    // Llegó ENTER sin datos, no hacer nada
+                    enviarCadenaPC("\r\n> ");
+                }
+            }
+            else
+            {
+                // Verificar si el buffer está a punto de llenarse
+                if(pos >= CORTAR_EN)
+                {
+                    detenerComunicacionExterna();
+                }
+                else if(pos < BUFFER_SIZE - 1)
+                {
+                    // Primera vez que llega un carácter? Iniciar timeout
+                    if(pos == 0 && !timeout_activo)
+                    {
+                        iniciarTimeout();
+                    }
+                    
+                    // Almacenar carácter
+                    buffer[pos] = caracter;
+                    pos++;
+                    
+                    // Opcional: eco en PC
+                    enviarCharPC(caracter);
+                }
+                else
+                {
+                    // Buffer completamente lleno
+                    detenerComunicacionExterna();
+                }
+            }
+        }
+    }
+}
