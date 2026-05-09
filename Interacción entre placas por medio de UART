@@ -1,0 +1,341 @@
+#include <msp430f5529.h>
+
+#define BUFFER_SIZE     64
+#define CORTAR_EN       50
+#define TIMEOUT_MS      1000
+
+// Variables globales
+char buffer[BUFFER_SIZE];
+unsigned char pos = 0;
+unsigned char detenido = 0;
+unsigned char timeout_activo = 0;
+
+// Variables para control de LEDs
+unsigned char modo_parpadeo = 0;        // 0 = apagado, 1 = parpadeando
+unsigned int contador_parpadeo = 0;
+
+// Prototipos
+void configurarUARTs(void);
+void configurarTimerTimeout(void);
+void configurarLEDs(void);
+void iniciarTimeout(void);
+void detenerTimeout(void);
+void enviarCharPC(char c);
+void enviarCadenaPC(const char *str);
+void enviarCharArduino(char c);
+void procesarComando(char comando, unsigned char origen);
+void parpadeoLEDs(void);
+
+// ==================== CONFIGURACIÓN LEDS ====================
+
+void configurarLEDs(void)
+{
+    // Configurar P1.0 como salida
+    P1DIR |= BIT0;
+    P1OUT &= ~BIT0;     // Inicialmente apagado
+
+    // Configurar P4.7 como salida
+    P4DIR |= BIT7;
+    P4OUT &= ~BIT7;     // Inicialmente apagado
+
+    enviarCadenaPC("\r\n[LEDS] Configurados: P1.0 y P4.7\r\n");
+}
+
+void procesarComando(char comando, unsigned char origen)
+{
+    // origen: 0 = desde Arduino, 1 = desde CCS
+    char* origen_str = (origen == 0) ? "[ARDUINO]" : "[CCS]";
+
+    if(comando == '1')
+    {
+        modo_parpadeo = 1;
+
+        // Encender LEDs inmediatamente
+        P1OUT |= BIT0;
+        P4OUT |= BIT7;
+
+        enviarCadenaPC("\r\n");
+        enviarCadenaPC(origen_str);
+        enviarCadenaPC(" LEDS ENCENDIDOS (modo parpadeo)\r\n> ");
+
+        // Confirmar al Arduino que recibió el comando
+        if(origen == 0)
+        {
+            enviarCharArduino('K');  // 'K' = OK, comando recibido
+        }
+    }
+    else if(comando == '0')
+    {
+        modo_parpadeo = 0;
+
+        // Apagar LEDs
+        P1OUT &= ~BIT0;
+        P4OUT &= ~BIT7;
+
+        enviarCadenaPC("\r\n");
+        enviarCadenaPC(origen_str);
+        enviarCadenaPC(" LEDS APAGADOS\r\n> ");
+
+        // Confirmar al Arduino que recibió el comando
+        if(origen == 0)
+        {
+            enviarCharArduino('K');
+        }
+    }
+}
+
+void parpadeoLEDs(void)
+{
+    static unsigned int contador = 0;
+
+    if(modo_parpadeo)
+    {
+        contador++;
+        if(contador >= 10000)  // Velocidad de parpadeo
+        {
+            contador = 0;
+            // Alternar ambos LEDs simultáneamente
+            P1OUT ^= BIT0;
+            P4OUT ^= BIT7;
+        }
+    }
+}
+
+// ==================== CONFIGURACIÓN UART ====================
+
+void configurarUARTs(void)
+{
+    // UCA1: Comunicación con PC (P4.4/P4.5)
+    P4SEL |= BIT4 + BIT5;
+    UCA1CTL1 |= UCSWRST;
+    UCA1CTL0 = 0x00;
+    UCA1CTL1 |= UCSSEL_1;           // ACLK
+    UCA1BR0 = 3;                    // 9600 baud
+    UCA1BR1 = 0;
+    UCA1MCTL = UCBRS_3;
+    UCA1CTL1 &= ~UCSWRST;
+
+    // UCA0: Comunicación con Arduino (P3.3/P3.4)
+    P3SEL |= BIT3 + BIT4;
+    UCA0CTL1 |= UCSWRST;
+    UCA0CTL0 = 0x00;
+    UCA0CTL1 |= UCSSEL_1;
+    UCA0BR0 = 3;
+    UCA0BR1 = 0;
+    UCA0MCTL = UCBRS_3;
+    UCA0CTL1 &= ~UCSWRST;
+}
+
+// ==================== FUNCIONES DE ENVÍO ====================
+
+void enviarCharPC(char c)
+{
+    while(!(UCA1IFG & UCTXIFG));
+    UCA1TXBUF = c;
+}
+
+void enviarCadenaPC(const char *str)
+{
+    while(*str) enviarCharPC(*str++);
+}
+
+void enviarCharArduino(char c)
+{
+    while(!(UCA0IFG & UCTXIFG));
+    UCA0TXBUF = c;
+}
+
+// ==================== TIMEOUT ====================
+
+void configurarTimerTimeout(void)
+{
+    TA0CTL = TASSEL_1 | ID_3 | TACLR;
+    TA0CTL &= ~(TAIE | TAIFG);
+    TA0CCTL0 &= ~(CCIE | CCIFG);
+}
+
+void iniciarTimeout(void)
+{
+    TA0R = 0;
+    TA0CTL &= ~TAIFG;
+
+    unsigned int ticks_1segundo = 4096;
+    TA0CCR0 = ticks_1segundo;
+    TA0CCTL0 = CCIE;
+    TA0CTL |= MC_2;
+
+    timeout_activo = 1;
+}
+
+void detenerTimeout(void)
+{
+    TA0CTL &= ~MC_2;
+    TA0CCTL0 &= ~CCIE;
+    TA0CTL &= ~TAIFG;
+    timeout_activo = 0;
+}
+
+#pragma vector=TIMER0_A0_VECTOR
+__interrupt void TIMER0_A0_ISR(void)
+{
+    if(timeout_activo && pos > 0 && !detenido)
+    {
+        buffer[pos] = '\0';
+
+        enviarCadenaPC("\r\n[TIMEOUT] Mensaje incompleto: ");
+        enviarCadenaPC(buffer);
+        enviarCadenaPC("\r\n> ");
+
+        pos = 0;
+        detenerTimeout();
+    }
+}
+
+// ==================== CONTROL DE BUFFER ====================
+
+void detenerComunicacionExterna(void)
+{
+    detenido = 1;
+    detenerTimeout();
+    enviarCadenaPC("\r\n[BUFFER LLENO] Recepcion detenida. Presiona 'r' para reiniciar\r\n> ");
+}
+
+void reanudarComunicacionExterna(void)
+{
+    detenido = 0;
+    pos = 0;
+    buffer[0] = '\0';
+    enviarCadenaPC("\r\n[REINICIADO] Buffer listo\r\n> ");
+}
+
+// ==================== PROGRAMA PRINCIPAL ====================
+
+void main(void)
+{
+    char caracter;
+
+    // Detener watchdog
+    WDTCTL = WDTPW | WDTHOLD;
+
+    // Configurar periféricos
+    configurarUARTs();
+    configurarTimerTimeout();
+    configurarLEDs();
+
+    // Mensaje de inicio
+    enviarCadenaPC("\r\n=== CONTROL DE LEDS POR UART ===\r\n");
+    enviarCadenaPC("LEDs: P1.0 y P4.7\r\n");
+    enviarCadenaPC("Comandos:\r\n");
+    enviarCadenaPC("  '1' - Encender LEDs (modo parpadeo)\r\n");
+    enviarCadenaPC("  '0' - Apagar LEDs\r\n");
+    enviarCadenaPC("  'r' - Reiniciar buffer\r\n");
+    enviarCadenaPC("----------------------------------------\r\n");
+    enviarCadenaPC("Esperando comandos desde ARDUINO o CCS...\r\n> ");
+
+    while(1)
+    {
+        // ==== ACTUALIZAR PARPADEO DE LEDs ====
+        parpadeoLEDs();
+
+        // ==== LEER COMANDOS DESDE LA PC (CCS) - PRIORIDAD ALTA ====
+        if(UCA1IFG & UCRXIFG)
+        {
+            char comando = UCA1RXBUF;
+
+            if(comando == 'r' || comando == 'R')
+            {
+                reanudarComunicacionExterna();
+            }
+            else if(comando == '1')
+            {
+                procesarComando('1', 1);  // origen = CCS
+                // Reenviar al Arduino para sincronizar
+                enviarCharArduino('1');
+            }
+            else if(comando == '0')
+            {
+                procesarComando('0', 1);  // origen = CCS
+                // Reenviar al Arduino para sincronizar
+                enviarCharArduino('0');
+            }
+            else
+            {
+                // Mostrar otros caracteres (eco)
+                enviarCharPC(comando);
+            }
+        }
+
+        // ==== LEER COMANDOS DESDE ARDUINO - PRIORIDAD ALTA ====
+        if(UCA0IFG & UCRXIFG)
+        {
+            caracter = UCA0RXBUF;
+
+            // PRIMERO: Verificar si es comando de LED
+            if(caracter == '1')
+            {
+                procesarComando('1', 0);  // origen = Arduino
+                continue;   // No almacenar en buffer
+            }
+            else if(caracter == '0')
+            {
+                procesarComando('0', 0);  // origen = Arduino
+                continue;   // No almacenar en buffer
+            }
+
+            // SEGUNDO: Si estamos detenidos, ignorar el resto
+            if(detenido)
+            {
+                continue;
+            }
+
+            // TERCERO: Procesar salto de línea
+            if(caracter == '\n' || caracter == '\r')
+            {
+                if(pos > 0)
+                {
+                    buffer[pos] = '\0';
+                    detenerTimeout();
+
+                    enviarCadenaPC("\r\n[ARDUINO] Mensaje: ");
+                    enviarCadenaPC(buffer);
+                    enviarCadenaPC("\r\n> ");
+
+                    pos = 0;
+                }
+                else
+                {
+                    enviarCadenaPC("\r\n> ");
+                }
+            }
+            else
+            {
+                // CUARTO: Almacenar en buffer (solo si no es comando)
+                if(pos >= CORTAR_EN)
+                {
+                    detenerComunicacionExterna();
+                }
+                else if(pos < BUFFER_SIZE - 1)
+                {
+                    if(pos == 0 && !timeout_activo)
+                    {
+                        iniciarTimeout();
+                    }
+
+                    buffer[pos] = caracter;
+                    pos++;
+
+                    // Eco en PC
+                    enviarCharPC(caracter);
+                }
+                else
+                {
+                    detenerComunicacionExterna();
+                }
+            }
+        }
+
+        // Pequeño delay para evitar saturación
+        __delay_cycles(100);
+    }
+}
+Con el mismo codigo de arduino, este codigo cuando enviamos un 1 o un 0 nos permite encender los leds del MSP
