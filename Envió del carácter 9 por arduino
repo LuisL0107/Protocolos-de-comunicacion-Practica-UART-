@@ -1,0 +1,34 @@
+void setup() {
+  // Inicializar comunicación serial para monitoreo en PC
+  Serial.begin(115200);
+  
+  // Inicializar UART en pines 18 (TX1) y 19 (RX1)
+  Serial1.begin(115200);
+  
+  Serial.println("Sistema iniciado - Enviando y recibiendo caracter '9'");
+}
+
+void loop() {
+  // Enviar el caracter '9'
+  Serial1.print('9');
+  Serial.println("Caracter '9' enviado");
+  
+  // Esperar a recibir respuesta
+  if (Serial1.available() > 0) {
+    char caracterRecibido = Serial1.read();
+    
+    // Mostrar el caracter recibido
+    Serial.print("Caracter recibido: ");
+    
+    // Verificar si es el caracter esperado
+    if (caracterRecibido == '9') {
+      Serial.println("✅ Confirmación correcta - Se recibió el '9'");
+    } else {
+      Serial.println("❌ Error - Se recibió otro caracter");
+    }
+  } else {
+    Serial.println("Esperando respuesta...");
+  }
+  
+
+}
